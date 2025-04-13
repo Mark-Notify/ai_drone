@@ -1,0 +1,5 @@
+opencv-python
+ultralytics
+deepface
+airsim
+numpy

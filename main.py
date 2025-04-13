@@ -1,13 +1,14 @@
+# main.py
+
 import os
 import cv2
 import json
+import uuid
 import numpy as np
-import face_recognition
+from deepface import DeepFace
 from ultralytics import YOLO
 import airsim
-import uuid
 
-# พาธฐานข้อมูล
 BASE_PATH = "faces_db"
 DB_FILE = "faces.json"
 
@@ -18,17 +19,14 @@ if os.path.exists(DB_FILE):
 else:
     known_faces = {}
 
-# โหลดใบหน้า (encoding)
-face_encodings = []
-face_names = []
-
+face_db = {}  # จัดเก็บ embedding ของใบหน้า
 for name, paths in known_faces.items():
     for path in paths:
-        img = face_recognition.load_image_file(path)
-        enc = face_recognition.face_encodings(img)
-        if enc:
-            face_encodings.append(enc[0])
-            face_names.append(name)
+        try:
+            embedding = DeepFace.represent(img_path=path, model_name='Facenet')[0]["embedding"]
+            face_db[path] = {"name": name, "embedding": embedding}
+        except:
+            continue
 
 # YOLOv8
 model = YOLO("yolov8n.pt")
@@ -40,7 +38,7 @@ client.enableApiControl(True)
 client.armDisarm(True)
 client.takeoffAsync().join()
 
-# สำหรับการคลิกเลือกคน
+# คลิกเลือกคน
 selected_box = None
 bounding_boxes = []
 face_labels = []
@@ -77,7 +75,6 @@ try:
         img1d = np.frombuffer(bytearray(raw), dtype=np.uint8)
         frame = cv2.imdecode(img1d, cv2.IMREAD_COLOR)
 
-        # YOLO ตรวจจับ
         results = model(frame)[0]
         bounding_boxes.clear()
         face_labels.clear()
@@ -90,22 +87,24 @@ try:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 bounding_boxes.append((x1, y1, x2, y2))
 
-                # ตัดภาพใบหน้า
                 face_img = frame[y1:y2, x1:x2]
-                rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-                encs = face_recognition.face_encodings(rgb_face)
 
-                if encs:
-                    matches = face_recognition.compare_faces(face_encodings, encs[0])
-                    name = "Unknown"
+                try:
+                    embedding = DeepFace.represent(face_img, model_name='Facenet')[0]["embedding"]
 
-                    if True in matches:
-                        name = face_names[matches.index(True)]
-                    else:
+                    best_match = "Unknown"
+                    best_score = 100  # ค่า distance เริ่มต้น
+
+                    for path, data in face_db.items():
+                        dist = np.linalg.norm(np.array(embedding) - np.array(data["embedding"]))
+                        if dist < 10 and dist < best_score:
+                            best_score = dist
+                            best_match = data["name"]
+
+                    if best_match == "Unknown":
                         cv2.imshow("Unknown Face", face_img)
                         cv2.waitKey(1)
                         name = input("ไม่รู้จัก ใส่ชื่อ: ").strip()
-
                         folder = os.path.join(BASE_PATH, name)
                         os.makedirs(folder, exist_ok=True)
                         filename = f"{uuid.uuid4().hex[:8]}.jpg"
@@ -113,22 +112,27 @@ try:
                         cv2.imwrite(filepath, face_img)
 
                         known_faces.setdefault(name, []).append(filepath)
-                        face_encodings.append(encs[0])
-                        face_names.append(name)
+
+                        face_db[filepath] = {
+                            "name": name,
+                            "embedding": embedding
+                        }
 
                         with open(DB_FILE, "w") as f:
                             json.dump(known_faces, f, indent=2)
 
-                    face_labels.append(name)
-                    cv2.putText(frame, name, (x1, y1 - 10),
+                        best_match = name
+
+                    face_labels.append(best_match)
+                    cv2.putText(frame, best_match, (x1, y1 - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                else:
+
+                except Exception as e:
                     face_labels.append("Unknown")
 
                 color = (0, 255, 0) if (x1, y1, x2, y2) != selected_box else (0, 0, 255)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # บินเข้าใกล้เป้า
         if selected_box:
             x1, y1, x2, y2 = selected_box
             move_to_target(x1, y1, x2 - x1, y2 - y1, frame.shape)
